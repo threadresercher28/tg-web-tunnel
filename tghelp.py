@@ -189,7 +189,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    port = 80
+    port = 8021
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])
