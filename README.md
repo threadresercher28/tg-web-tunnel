@@ -38,7 +38,7 @@
 ### Клиент (ваш компьютер)
 - Python 3.6 или выше
 - pip (менеджер пакетов Python)
-- Модули: `requests`, `aiohttp`, `colorlog`
+- Модули: `requests`, `urllib3`
 
 ### Сервер (хостинг)
 - PHP 7.0 или выше
