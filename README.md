@@ -68,6 +68,17 @@
 # Клонируем репозиторий
 git clone https://github.com/yourusername/tg-web-tunnel.git
 cd tg-web-tunnel
+```
+
+## Настройка Telegram
+Telegram Desktop версия 4.0+ 
+```Настройки → Дополнительно (Advanced) → Тип соединения (Connection Type) → Добавить прокси → HTTP```:
+Хост: ```127.0.0.1``` Порт: ```(из config.py)```
+
+Telegram Desktop версия 3.x и старше 
+```Настройки → Продвинутые настройки (Advanced Settings) → Тип соединения (Connection Type) → Добавить прокси → HTTP```
+Хост: ```127.0.0.1``` Порт: ```(из config.py)```
 
 # Устанавливаем зависимости
 pip install -r requirements.txt 
+№№
