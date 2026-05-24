@@ -1,6 +1,6 @@
 # 🌐 TG Web Tunnel
 
-Превращает обычный PHP-хостинг в прокси для Telegram Desktop. Обходит блокировки, используя HTTP-прокси через веб-сервер.
+Превращает обычный PHP-хостинг в прокси для Telegram Desktop. Обходит блокировки, используя ```HTTP-прокси``` через веб-сервер.
 
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://python.org)
 [![PHP](https://img.shields.io/badge/PHP-7.0+-purple.svg)](https://php.net)
