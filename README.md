@@ -70,7 +70,7 @@ git clone https://github.com/yourusername/tg-web-tunnel.git
 cd tg-web-tunnel
 ```
 
-## Настройка Telegram
+## Настройка telegram
 Telegram Desktop версия 4.0+<br>
 ```Настройки → Дополнительно (Advanced) → Тип соединения (Connection Type) → Добавить прокси → HTTP```:
 <br> Хост: ```127.0.0.1```<br>
