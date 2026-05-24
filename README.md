@@ -51,10 +51,10 @@
 ### 1. Клиентская часть
 
 ```bash
-# Клонируем репозиторий
-pip install -r requirements.txt
 git clone https://github.com/yourusername/tg-web-tunnel.git
 cd tg-web-tunnel
+pip install -r requirements.txt
+python3 tghelp.py
 ```
 
 ## Настройка telegram
