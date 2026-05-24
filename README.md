@@ -74,12 +74,14 @@ cd tg-web-tunnel
 Telegram Desktop версия 4.0+
 
 ```Настройки → Дополнительно (Advanced) → Тип соединения (Connection Type) → Добавить прокси → HTTP```:
-Хост: ```127.0.0.1``` Порт: ```(из config.py)```
+Хост: ```127.0.0.1```
+Порт: ```(из config.py)```
 
 Telegram Desktop версия 3.x и старше
 
 ```Настройки → Продвинутые настройки (Advanced Settings) → Тип соединения (Connection Type) → Добавить прокси → HTTP```
-Хост: ```127.0.0.1``` Порт: ```(из config.py)```
+Хост: ```127.0.0.1```
+Порт: ```(из config.py)```
 
 # Устанавливаем зависимости
 pip install -r requirements.txt 
