@@ -71,11 +71,13 @@ cd tg-web-tunnel
 ```
 
 ## Настройка Telegram
-Telegram Desktop версия 4.0+ 
+Telegram Desktop версия 4.0+
+
 ```Настройки → Дополнительно (Advanced) → Тип соединения (Connection Type) → Добавить прокси → HTTP```:
 Хост: ```127.0.0.1``` Порт: ```(из config.py)```
 
-Telegram Desktop версия 3.x и старше 
+Telegram Desktop версия 3.x и старше
+
 ```Настройки → Продвинутые настройки (Advanced Settings) → Тип соединения (Connection Type) → Добавить прокси → HTTP```
 Хост: ```127.0.0.1``` Порт: ```(из config.py)```
 
