@@ -66,6 +66,7 @@
 
 ```bash
 # Клонируем репозиторий
+pip install -r requirements.txt
 git clone https://github.com/yourusername/tg-web-tunnel.git
 cd tg-web-tunnel
 ```
@@ -80,7 +81,3 @@ Telegram Desktop версия 3.x и старше<br>
 ```Настройки → Продвинутые настройки (Advanced Settings) → Тип соединения (Connection Type) → Добавить прокси → HTTP```<br>
 Хост: ```127.0.0.1```<br>
 Порт: ```(из config.py)```
-
-# Устанавливаем зависимости
-pip install -r requirements.txt 
-№№
