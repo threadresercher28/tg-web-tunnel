@@ -1,7 +1,4 @@
 <?php
-/**
- * Streaming PHP Proxy for Telegram (Secured & Minified)
- */
 ini_set('max_execution_time',300);ini_set('memory_limit','512M');ini_set('zlib.output_compression','Off');ini_set('output_buffering','Off');
 if(function_exists('apache_setenv'))apache_setenv('no-gzip','1');
 if(session_status()===PHP_SESSION_ACTIVE)session_write_close();
