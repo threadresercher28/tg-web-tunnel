@@ -1,270 +1,305 @@
 #!/usr/bin/env python3
 import sys
 import logging
-import urllib3
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-# Импортируем настройки
 import config
-
-# Отключаем предупреждения о сертификатах
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Настройка логирования
 logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL),
-    format=config.LOG_FORMAT
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+    format=config.LOG_FORMAT if hasattr(config, 'LOG_FORMAT') else '%(asctime)s [%(levelname)s] %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-class ServerManager:
-    """Управляет списком серверов, их рейтингом и выбором лучшего."""
+# --- Конфигурация безопасности (можно вынести в config.py) ---
+ALLOWED_TARGET_HOSTS = [
+    'api.telegram.org',
+    'telegram.org',
+    't.me',
+    'web.telegram.org',
+    'cdn.telegram.org',
+    'core.telegram.org',
+    'upload.telegram.org',
+    'venus.telegram.org',
+    'aurora.telegram.org',
+    'vesta.telegram.org',
+]
+ALLOWED_TARGET_IP_RANGES = [
+    '91.108.56.0/22', '91.108.4.0/22', '91.108.8.0/22',
+    '91.108.16.0/22', '91.108.12.0/22', '149.154.160.0/20',
+    '91.105.192.0/23', '91.108.20.0/22', '185.76.151.0/24',
+    '2001:b28:f23d::/48', '2001:b28:f23f::/48', '2001:67c:4e8::/48',
+    '2001:b28:f23c::/48', '2a0a:f280::/32'
+]
+ALLOWED_CLIENT_HEADERS = {
+    'content-type', 'accept', 'accept-encoding', 'accept-language',
+    'authorization', 'user-agent', 'x-requested-with',
+    'cache-control', 'pragma', 'referer', 'origin'
+}
+MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 МБ
+REQUEST_TIMEOUT = getattr(config, 'REQUEST_TIMEOUT', 30)
+CONNECT_TIMEOUT = 10
+MAX_RETRIES = 2
 
+# --- Вспомогательные функции ---
+def ip_in_range(ip, range_cidr):
+    """Проверяет, входит ли IP в CIDR-диапазон."""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(range_cidr, strict=False)
+    except ValueError:
+        return False
+
+def is_target_url_safe(url):
+    """Жёсткая проверка целевого URL."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != 'https':
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    # Запрет IP-адресов в URL
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    # Домен должен быть в белом списке
+    if host.lower() not in [h.lower() for h in ALLOWED_TARGET_HOSTS]:
+        return False
+    # Резолвинг хоста и проверка IP (защита от DNS-ребиндинга)
+    try:
+        import socket
+        ips = [addr[4][0] for addr in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)]
+    except socket.gaierror:
+        return False
+    for ip in ips:
+        allowed = any(ip_in_range(ip, r) for r in ALLOWED_TARGET_IP_RANGES)
+        if not allowed:
+            return False
+    return True
+
+def filter_client_headers(raw_headers):
+    """Оставляет только разрешённые заголовки, удаляет CRLF-инъекции."""
+    clean = {}
+    for name, value in raw_headers.items():
+        safe_name = name.replace('\r', '').replace('\n', '').strip().lower()
+        safe_value = value.replace('\r', '').replace('\n', '').strip()
+        if safe_name in ALLOWED_CLIENT_HEADERS:
+            clean[safe_name] = safe_value
+    return clean
+
+# --- Менеджер серверов (оставлен почти без изменений) ---
+class ServerManager:
     def __init__(self, servers_list):
         self.original_servers = servers_list
-        self.active_servers = [] # Список кортежей (url, latency)
+        self.active_servers = []
         self.lock = threading.Lock()
         self.current_index = 0
-
-        # Инициализация: проверяем серверы
         self._check_and_sort_servers()
 
     def _check_and_sort_servers(self):
-        """Пингует все серверы и сортирует их по скорости."""
-        logger.info("🔍 Проверка доступности серверов...")
+        logger.info("Checking servers...")
         results = []
-
         for url in self.original_servers:
             latency = self._ping_server(url)
             if latency is not None:
                 results.append((url, latency))
-                logger.info(f"   ✅ {url} — OK ({latency:.2f}s)")
+                logger.info(f"  OK: {url} ({latency:.2f}s)")
             else:
-                logger.warning(f"   ❌ {url} — Недоступен")
-
+                logger.warning(f"  FAIL: {url}")
         if not results:
-            logger.error("⛔ Нет доступных серверов! Прокси не сможет работать.")
-            self.active_servers = [(self.original_servers[0], 999)] # Fallback на первый
+            logger.error("No servers available, using first as fallback")
+            self.active_servers = [(self.original_servers[0], 999)]
         else:
-            # Сортируем по времени отклика (меньше = лучше)
             results.sort(key=lambda x: x[1])
             self.active_servers = results
-            logger.info(f"🚀 Лучший сервер: {self.active_servers[0][0]}")
+            logger.info(f"Best server: {self.active_servers[0][0]}")
 
     def _ping_server(self, url):
-        """Делает быстрый HEAD запрос для проверки сервера."""
         try:
-            start_time = time.time()
-            # Пробуем сделать легкий запрос к самому скрипту или его корню
-            # Если prx.php требует параметр url, можно попробовать отправить пустой или неверный,
-            # но лучше просто проверить доступность хоста.
-            # Здесь мы просто делаем GET к URL, ожидая любого ответа (даже 400/404)
-            resp = requests.get(url, timeout=config.PING_TIMEOUT, verify=False)
-            elapsed = time.time() - start_time
+            start = time.time()
+            resp = requests.get(url, timeout=CONNECT_TIMEOUT, verify=True)
+            elapsed = time.time() - start
             return elapsed
         except Exception:
             return None
 
     def get_best_server(self):
-        """Возвращает URL текущего лучшего сервера."""
         with self.lock:
             if not self.active_servers:
-                return self.original_servers[0] # Крайний случай
+                return self.original_servers[0]
             return self.active_servers[self.current_index][0]
 
     def mark_failed_and_switch(self, failed_url):
-        """Если сервер упал, переключаемся на следующий."""
         with self.lock:
             if not self.active_servers:
                 return
-
-            current_url = self.active_servers[self.current_index][0]
-
-            # Если упал тот, который мы сейчас используем
-            if current_url == failed_url:
-                logger.warning(f"⚠️ Сервер {failed_url} недоступен. Переключение...")
-
-                # Пробуем следующий
-                next_index = (self.current_index + 1) % len(self.active_servers)
-
-                # Если прошли круг и вернулись к тому же, значит все упали
-                if next_index == self.current_index:
-                    logger.error("❌ Все серверы в списке недоступны!")
+            cur = self.active_servers[self.current_index][0]
+            if cur == failed_url:
+                logger.warning(f"Server failed: {failed_url}")
+                self.current_index = (self.current_index + 1) % len(self.active_servers)
+                if self.current_index == 0:
+                    logger.error("All servers are down!")
                 else:
-                    self.current_index = next_index
-                    new_url = self.active_servers[self.current_index][0]
-                    logger.info(f"🔄 Переключено на: {new_url}")
+                    logger.info(f"Switched to: {self.active_servers[self.current_index][0]}")
 
-# Глобальный менеджер серверов
+# Глобальный менеджер
 server_manager = ServerManager(config.PHP_PROXY_SERVERS)
 
+# --- HTTP обработчик ---
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    timeout = 60
+    timeout = REQUEST_TIMEOUT
 
     def do_GET(self): self._safe_forward()
     def do_POST(self): self._safe_forward()
-    def do_PUT(self): self._safe_forward()
-    def do_DELETE(self): self._safe_forward()
-    def do_HEAD(self): self._safe_forward()
-    def do_OPTIONS(self): self._safe_forward()
+    # Остальные методы не нужны для прокси Telegram
+    # def do_PUT etc.
 
     def _safe_forward(self):
         try:
             self._forward()
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
-            try:
-                if not self.wfile.closed:
-                    self.send_error(502, "Internal Proxy Error")
-            except:
-                pass
+            logger.error(f"Unhandled error: {e}", exc_info=True)
+            self._send_error(502)
 
     def _forward(self):
-        session = None
-        # Получаем текущий лучший сервер
+        # --- 1. Извлечение и валидация целевого URL ---
+        target = self.path
+        if target.startswith('/'):
+            target = target.lstrip('/')
+        # Ожидаем абсолютный URL, начинающийся с https://
+        if not target.startswith('https://'):
+            self._send_error(400, "Only absolute HTTPS URLs are allowed")
+            return
+        if len(target) > 2048:
+            self._send_error(414)
+            return
+        if not is_target_url_safe(target):
+            self._send_error(403, "Access denied")
+            return
+
         base_php_url = server_manager.get_best_server()
+        upstream_url = f"{base_php_url}?url={quote(target, safe='')}"
+
+        # --- 2. Чтение тела запроса с ограничением ---
+        content_length = self.headers.get('Content-Length')
+        body = None
+        if content_length:
+            try:
+                clen = int(content_length)
+                if clen < 0 or clen > MAX_BODY_SIZE:
+                    self._send_error(413)
+                    return
+                if clen > 0:
+                    body = self.rfile.read(clen)
+            except (ValueError, OSError):
+                self._send_error(400)
+                return
+
+        # --- 3. Фильтрация заголовков ---
+        client_headers = {k: v for k, v in self.headers.items()}
+        fwd_headers = filter_client_headers(client_headers)
+        # Принудительно заменяем User-Agent для единообразия
+        fwd_headers['User-Agent'] = 'TelegramProxy/2.0'
+
+        # --- 4. Отправка запроса через requests с проверкой SSL ---
+        session = requests.Session()
+        retries = Retry(
+            total=MAX_RETRIES,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount('https://', adapter)   # только HTTPS, т.к. PHP-сервер должен быть HTTPS
+        session.mount('http://', adapter)    # на случай, если PHP-сервер на HTTP (тогда verify=False? риск)
 
         try:
-            # ---------- 1. Целевой URL ----------
-            target = self.path
-            if not target.startswith(('http://', 'https://')):
-                host = self.headers.get('Host', '')
-                if not host:
-                    raise ValueError("Отсутствует Host")
-                target = f'http://{host}{target}'
-
-            upstream_url = f"{base_php_url}?url={quote(target, safe='')}"
-
-            # ---------- 2. Тело запроса ----------
-            content_length = self.headers.get('Content-Length')
-            body = None
-            if content_length:
-                try:
-                    clen = int(content_length)
-                    if clen > 0:
-                        body = self.rfile.read(clen)
-                except ValueError:
-                    pass
-
-            # ---------- 3. Заголовки ----------
-            fwd_headers = {}
-            for k, v in self.headers.items():
-                kl = k.lower()
-                if kl not in ('host', 'connection', 'proxy-connection', 'content-length', 'transfer-encoding', 'keep-alive'):
-                    fwd_headers[k] = v
-            if 'Content-Type' in self.headers:
-                 fwd_headers['Content-Type'] = self.headers['Content-Type']
-
-            # ---------- 4. Сессия ----------
-            session = requests.Session()
-            retries = Retry(
-                total=config.MAX_RETRIES,
-                backoff_factor=config.BACKOFF_FACTOR,
-                status_forcelist=config.RETRY_STATUS_CODES,
-                allowed_methods=frozenset(['GET', 'POST', 'PUT', 'DELETE', 'HEAD'])
-            )
-            adapter = HTTPAdapter(max_retries=retries)
-            session.mount('http://', adapter)
-            session.mount('https://', adapter)
-
-            logger.debug(f"-> {self.command} {target} via {base_php_url}")
-
             resp = session.request(
                 method=self.command,
                 url=upstream_url,
                 headers=fwd_headers,
                 data=body,
-                verify=False,
-                stream=True,
-                timeout=config.REQUEST_TIMEOUT
+                verify=True,                # Требуем валидный SSL-сертификат
+                timeout=REQUEST_TIMEOUT,
+                stream=True
             )
-
-            # ---------- 5. Ответ клиенту ----------
-            try:
-                self.send_response(resp.status_code)
-                for k, v in resp.headers.items():
-                    kl = k.lower()
-                    if kl not in ('transfer-encoding', 'connection', 'keep-alive', 'content-encoding'):
-                        if kl == 'transfer-encoding' and v.lower() == 'chunked':
-                            continue
-                        try:
-                            self.send_header(k, v)
-                        except:
-                            pass
-
-                self.end_headers()
-
-                for chunk in resp.iter_content(config.CHUNK_SIZE):
-                    if chunk:
-                        try:
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                        except (BrokenPipeError, ConnectionResetError):
-                            return
-                        except Exception:
-                            return
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            except Exception as write_err:
-                logger.error(f"Ошибка записи: {write_err}")
-
         except requests.exceptions.Timeout:
-            logger.warning(f"Timeout на сервере {base_php_url}")
-            # Помечаем сервер как плохой и пробуем другой в следующий раз
             server_manager.mark_failed_and_switch(base_php_url)
-            self._safe_error(504, "Gateway Timeout")
-
+            self._send_error(504)
+            return
         except requests.exceptions.ConnectionError:
-            logger.warning(f"ConnectionError на сервере {base_php_url}")
             server_manager.mark_failed_and_switch(base_php_url)
-            self._safe_error(502, "Bad Gateway")
-
+            self._send_error(502)
+            return
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            self._safe_error(502, "Proxy Error")
-        finally:
-            if session:
-                session.close()
+            logger.error(f"Upstream request error: {e}")
+            self._send_error(502)
+            return
 
-    def _safe_error(self, code, message):
+        # --- 5. Проброс ответа с фильтрацией заголовков ---
+        try:
+            self.send_response(resp.status_code)
+            # Заголовки, которые нельзя передавать клиенту
+            prohibited = {'transfer-encoding', 'connection', 'keep-alive', 'content-encoding', 'content-security-policy'}
+            for k, v in resp.headers.items():
+                if k.lower() in prohibited:
+                    continue
+                self.send_header(k, v)
+            self.end_headers()
+
+            # Чтение ответа с ограничением размера? Можно добавить в будущем.
+            for chunk in resp.iter_content(chunk_size=8192):
+                try:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            logger.error(f"Error sending response: {e}")
+        finally:
+            session.close()
+
+    def _send_error(self, code, message=None):
         try:
             self.send_response(code)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write(message.encode('utf-8'))
-        except:
+            default_msgs = {400: 'Bad Request', 403: 'Forbidden', 413: 'Payload Too Large',
+                            414: 'URI Too Long', 502: 'Bad Gateway', 504: 'Gateway Timeout'}
+            msg = message or default_msgs.get(code, 'Error')
+            self.wfile.write(msg.encode())
+        except Exception:
             pass
 
     def log_message(self, format, *args):
+        # Отключаем стандартное логирование, используем наш logger
         pass
 
 if __name__ == '__main__':
     port = config.LISTEN_PORT
     if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            print("Неверный порт")
-            sys.exit(1)
-
+        port = int(sys.argv[1])
     server = ThreadedHTTPServer(('0.0.0.0', port), ProxyHandler)
-
-    print(f"✅ Прокси запущен на 0.0.0.0:{port}")
-    print(f"📋 Серверов в пуле: {len(config.PHP_PROXY_SERVERS)}")
-
+    print(f"Proxy started on 0.0.0.0:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n⏹️ Сервер остановлен")
+        print("\nServer stopped")
         server.server_close()
